@@ -8,7 +8,7 @@ import ChatBox from './components/ChatBox';
 import RightSidebar from './components/RightSidebar';
 import { Task, ChatMessage, Notification } from './types';
 import { initialTasks, mockNotifications } from './data';
-import { v4 as uuidv4 } from 'uuid';
+import { parseAICommand, executeIntent } from './workspace/aiEngine';
 
 function App() {
   // Auth state
@@ -49,20 +49,38 @@ function App() {
     ));
   }, []);
 
-  const handleAddTask = () => {
-    const newId = Math.max(...tasks.map(t => t.id)) + 1;
-    const newTask: Task = {
-      id: newId,
-      title: 'New Task',
-      assignee: userName || 'Unassigned',
-      status: 'Not Started',
-      priority: 'Medium',
-      dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-      category: 'General',
-      notes: '',
-    };
-    setTasks(prev => [...prev, newTask]);
-  };
+  const handleAddTask = useCallback(() => {
+    setTasks(prev => {
+      const newId = Math.max(...prev.map(t => t.id)) + 1;
+      const newTask: Task = {
+        id: newId,
+        title: '',
+        assignee: userName || 'Unassigned',
+        status: 'Not Started',
+        priority: 'Medium',
+        dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+        category: 'General',
+        notes: '',
+      };
+      return [...prev, newTask];
+    });
+  }, [userName]);
+
+  const handleDeleteTask = useCallback((rowIndex: number) => {
+    setTasks(prev => prev.filter((_, i) => i !== rowIndex));
+  }, []);
+
+  const handleBatchUpdate = useCallback((updates: { rowIndex: number; colKey: string; value: string }[]) => {
+    setTasks(prev => {
+      const newTasks = [...prev];
+      updates.forEach(u => {
+        if (newTasks[u.rowIndex]) {
+          newTasks[u.rowIndex] = { ...newTasks[u.rowIndex], [u.colKey]: u.value };
+        }
+      });
+      return newTasks;
+    });
+  }, []);
 
   const handleMarkNotificationRead = (id: string) => {
     setNotifications(prev => prev.map(n =>
@@ -70,71 +88,29 @@ function App() {
     ));
   };
 
-  const processAIResponse = (userMessage: string): string => {
-    const lower = userMessage.toLowerCase();
-
-    if (lower.includes('mark') && lower.includes('done')) {
-      const match = userMessage.match(/#?(\d+)/);
-      if (match) {
-        const taskId = parseInt(match[1]);
-        const task = tasks.find(t => t.id === taskId);
-        if (task) {
-          handleUpdateTask(taskId, 'status', 'Done');
-          return `✅ Done! Task #${taskId} "${task.title}" has been marked as **Done**. The grid has been updated in real-time.`;
-        }
-        return `❌ I couldn't find task #${taskId}. Please check the task ID and try again.`;
-      }
-      return `I'd be happy to mark a task as done. Please specify the task ID (e.g., "Mark task #105 as Done").`;
-    }
-
-    if (lower.includes('add') && (lower.includes('task') || lower.includes('new'))) {
-      handleAddTask();
-      const newId = Math.max(...tasks.map(t => t.id));
-      return `✅ New task created with ID #${newId}. You can edit the details by double-clicking on any cell in the grid.`;
-    }
-
-    if (lower.includes('blocked')) {
-      const blocked = tasks.filter(t => t.status === 'Blocked');
-      if (blocked.length > 0) {
-        const list = blocked.map(t => `• #${t.id}: ${t.title} (${t.assignee})`).join('\n');
-        return `🔴 Found ${blocked.length} blocked task(s):\n${list}\n\nWould you like me to help resolve any of these?`;
-      }
-      return `✅ No blocked tasks found! All tasks are either in progress, completed, or not started.`;
-    }
-
-    if (lower.includes('report')) {
-      return `📊 I can generate a report for you. Please use the **"More"** button in the right sidebar to:\n\n1. Select the format (PDF, Excel, or Image)\n2. Enter the recipient email\n3. Choose what to include\n\nThe report will be generated and emailed automatically.`;
-    }
-
-    if (lower.includes('status') || lower.includes('summary') || lower.includes('overview')) {
-      const done = tasks.filter(t => t.status === 'Done').length;
-      const inProgress = tasks.filter(t => t.status === 'In Progress').length;
-      const notStarted = tasks.filter(t => t.status === 'Not Started').length;
-      const blocked = tasks.filter(t => t.status === 'Blocked').length;
-      return `📈 **Task Summary:**\n• ✅ Done: ${done}\n• 🔄 In Progress: ${inProgress}\n• ⏳ Not Started: ${notStarted}\n• 🚫 Blocked: ${blocked}\n\nTotal: ${tasks.length} tasks`;
-    }
-
-    if (lower.includes('help') || lower.includes('what can you do')) {
-      return `🤖 I can help you with:\n\n• **Update tasks** - "Mark task #105 as Done"\n• **Create tasks** - "Add a new task for next week"\n• **Filter data** - "Show me all blocked tasks"\n• **Generate reports** - "Generate weekly report"\n• **Get summaries** - "Give me a task overview"\n\nJust type naturally and I'll handle the rest!`;
-    }
-
-    return `I understand you want to: "${userMessage}"\n\nI can help with task management, data analysis, and report generation. Try commands like:\n• "Mark task #105 as Done"\n• "Show me all blocked tasks"\n• "Give me a task summary"\n\nType "help" for more options.`;
-  };
-
   const handleSendMessage = (message: string) => {
+    // Check if this is an AI response being added
+    if (message.startsWith('__AI_RESPONSE__')) {
+      const msgData = JSON.parse(message.replace('__AI_RESPONSE__', ''));
+      setChatMessages(prev => [...prev, msgData]);
+      setIsProcessing(false);
+      return;
+    }
+
     if (aiActionsUsed >= aiActionsLimit) {
       const limitMsg: ChatMessage = {
-        id: uuidv4(),
+        id: crypto.randomUUID(),
         role: 'assistant',
-        content: '⚠️ You have reached your AI action limit (50/50) for this month. Please upgrade your plan or wait until next month for more actions.',
+        content: '⚠️ You have reached your AI action limit (50/50) for this month. Please upgrade your plan or wait until next month.',
         timestamp: new Date(),
       };
       setChatMessages(prev => [...prev, limitMsg]);
       return;
     }
 
+    // Add user message
     const userMsg: ChatMessage = {
-      id: uuidv4(),
+      id: crypto.randomUUID(),
       role: 'user',
       content: message,
       timestamp: new Date(),
@@ -142,11 +118,22 @@ function App() {
     setChatMessages(prev => [...prev, userMsg]);
     setIsProcessing(true);
 
-    // Simulate AI processing
+    // Process with AI engine
     setTimeout(() => {
-      const response = processAIResponse(message);
+      const intent = parseAICommand(message, tasks);
+      const response = executeIntent(intent, tasks, {
+        updateCell: (rowIndex, colKey, value) => {
+          if (rowIndex >= 0 && rowIndex < tasks.length) {
+            handleUpdateTask(tasks[rowIndex].id, colKey, value);
+          }
+        },
+        addRow: () => handleAddTask(),
+        deleteRow: (rowIndex) => handleDeleteTask(rowIndex),
+        batchUpdate: (updates) => handleBatchUpdate(updates)
+      });
+
       const assistantMsg: ChatMessage = {
-        id: uuidv4(),
+        id: crypto.randomUUID(),
         role: 'assistant',
         content: response,
         timestamp: new Date(),
@@ -154,7 +141,7 @@ function App() {
       setChatMessages(prev => [...prev, assistantMsg]);
       setIsProcessing(false);
       setAiActionsUsed(prev => prev + 1);
-    }, 1200);
+    }, 600);
   };
 
   if (!isAuthenticated) {
@@ -163,7 +150,6 @@ function App() {
 
   return (
     <div className="h-screen flex flex-col bg-slate-900 text-white overflow-hidden">
-      {/* Main layout */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left Sidebar */}
         <Sidebar
@@ -177,14 +163,12 @@ function App() {
 
         {/* Main content area */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Header */}
           <Header
             userName={userName}
             darkMode={darkMode}
             onToggleDarkMode={() => setDarkMode(!darkMode)}
           />
 
-          {/* Workspace content */}
           <AnimatePresence mode="wait">
             {activeSection === 'workspace' ? (
               <motion.div
@@ -251,6 +235,11 @@ function App() {
             aiActionsUsed={aiActionsUsed}
             aiActionsLimit={aiActionsLimit}
             isProcessing={isProcessing}
+            tasks={tasks}
+            onUpdateTask={handleUpdateTask}
+            onAddTask={handleAddTask}
+            onDeleteTask={handleDeleteTask}
+            onBatchUpdate={handleBatchUpdate}
           />
         </div>
       </div>
